@@ -1,0 +1,656 @@
+**POGLS V3.4**
+
+*Positional Geometry Logic Storage*
+
+**LOCKED SPECIFICATION --- CHECKPOINT**
+
+2026-03-03
+
+  -----------------------------------------------------------------------
+  **Field**                           **Value**
+  ----------------------------------- -----------------------------------
+  System                              POGLS V3.4 --- Crash-Consistent
+                                      Append-Only Vault Engine
+
+  Status                              LOCKED --- No breaking changes
+                                      without version bump
+
+  Test Coverage                       WAL: 24/24 \| Snapshot: 37/37 \|
+                                      Kill cycles: 200/200
+
+  Durability                          CRC32 per WAL record + SHA-256
+                                      snapshot anchor + fdatasync
+
+  Date                                2026-03-03
+
+  Authors                             POGLS Core Team
+  -----------------------------------------------------------------------
+
+**1. System Overview**
+
+POGLS V3.4 is a binary storage engine based on angular addressing. The
+core law is:
+
+**A = floor( θ × 2ⁿ )**
+
+Where n=20 by default, giving 1,048,576 unique addresses. All offset
+arithmetic uses bit-shift only --- no multiply/divide in hot paths.
+
+**1.1 Architecture Layers**
+
+  ------------------------------------------------------------------------
+  **Layer**             **Component**                 **Status**
+  --------------------- ----------------------------- --------------------
+  Storage Core          Shadow Block (16B) + Deep     ✅ Production
+                        Block (256B)                  
+
+  Write Safety          WAL --- CRC32 + fdatasync +   ✅ Locked
+                        two-pass replay               
+
+  State Integrity       Snapshot --- SHA-256 +        ✅ Locked
+                        fsync + monotonic seq         
+
+  Kill-Test Proof       200 SIGKILL cycles, 0         ✅ Verified
+                        corruption                    
+
+  Hydra Heads           Multi-head write,             ✅ Production
+                        spawn/retract by density      
+
+  Audit Tiles           Overlap scan, anomaly         ✅ Production
+                        signals, signal queue         
+
+  VisualFeed            Read-only observer (never     ✅ Production
+                        touches Core)                 
+
+  Python Bridge         V31Adapter + VisualFrame +    ✅ Production
+                        ComfyUI node                  
+
+  Fabric Layer          BlockFabric + SliceView +     ✅ Stable
+                        zero-copy mmap                
+
+  GUI                   PUI.pyw --- Tkinter GEOMETRY  ✅ Stable
+                        MAP + AUDIT tabs              
+  ------------------------------------------------------------------------
+
+**2. File Index**
+
+**2.1 C Core --- Storage Engine**
+
+  -------------------------------------------------------------------------
+  **File**                  **Role**                             **Size**
+  ------------------------- ------------------------------------ ----------
+  pogls_v3.h                Master header --- all types,         277 lines
+                            constants, macros. THE LAW defined   
+                            here.                                
+
+  angular_mapper.c          A = floor(θ ×2ⁿ), mmap vault,        362 lines
+                            Shadow/Deep R/W, Warp decode         
+
+  pogls_hydra.h/.c          Hydra multi-head: spawn (\>4MB) /    \~400
+                            retract (\<512KB) / routing          lines
+
+  pogls_audit.h/.c          Tile scan, 6.25% overlap, anomaly    \~300
+                            flags (6 types), signal queue        lines
+
+  pogls_snapshot.h/.c       Snapshot lifecycle:                  \~250
+                            PENDING→CERTIFIED/AUTO→VOID state    lines
+                            machine                              
+
+  pogls_visual.h/.c         VisualFeed read-only observer, JSON  \~350
+                            line output, VF_HeadSnap/TileSnap    lines
+
+  pogls_extensions.c        Legacy V2 wrapper, FileChunker       \~200
+                            (100MB chunks), HoneycombSlot stub   lines
+
+  pogls_wal.h/.c            WAL: CRC32 + fdatasync + two-pass    \~300
+                            replay + next_seq restore            lines
+
+  pogls_snapshot_wal.h/.c   Snapshot integrity: SHA-256          \~285
+                            (self-contained) + fsync + monotonic lines
+                            seq                                  
+  -------------------------------------------------------------------------
+
+**2.2 Test Binaries**
+
+  -----------------------------------------------------------------------------
+  **File**                    **Purpose**                          **Result**
+  --------------------------- ------------------------------------ ------------
+  pogls_wal_test.c            WAL unit tests: CRC, fdatasync,      24/24 PASS
+                              replay, reopen, boundary             
+
+  pogls_snapshot_wal_test.c   Snapshot tests: SHA-256 vectors,     37/37 PASS
+                              corruption detect, 2-layer drill     
+
+  pogls_wal_worker.c          Kill-test worker: writes N records   Compiles OK
+                              via WAL, killable at any point       
+
+  pogls_wal_verify.c          Post-kill verifier: replay +         Compiles OK
+                              deterministic payload check          
+
+  pogls_kill_test.py          Python runner: 200 SIGKILL cycles, 0 200/200 PASS
+                              failures                             
+  -----------------------------------------------------------------------------
+
+**2.3 Python / Tool Layer**
+
+  ------------------------------------------------------------------------
+  **File**               **Role**
+  ---------------------- -------------------------------------------------
+  pogls_controller.py    AngularMapper, POGLSVault, POGLS top-level API,
+                         V31Adapter, VisualFrame
+
+  comfyui_bridge.py      POGLSBridge, ModelManifest, ImageMeta,
+                         VisualSnapshot, ComfyUI node output
+
+  pogls_fabric.py        BlockFabric: mmap + fixed-width blocks + snapshot
+                         pointer + audit lane
+
+  st_to_fabric.py        STFabricConverter: .safetensors → .pogls fabric
+                         (zero-copy tensor load)
+
+  workflow_versions.py   WorkflowVersions: ComfyUI workflow
+                         save/load/diff/restore via fabric snapshots
+
+  PUI.pyw                GUI: Tkinter, GEOMETRY MAP (draggable nodes) +
+                         INTEGRITY AUDIT (migration sim)
+
+  pogls_config.json      System configuration
+  ------------------------------------------------------------------------
+
+**3. Locked Constants --- DO NOT CHANGE**
+
+These values are frozen at this checkpoint. Any change requires a
+version bump (V3.5+).
+
+**3.1 Core Constants**
+
+  ------------------------------------------------------------------------
+  **Constant**             **Value**       **Meaning**
+  ------------------------ --------------- -------------------------------
+  ANGULAR_N_DEFAULT        20              2²⁰ = 1,048,576 addresses
+
+  SHADOW_BLOCK_SIZE        16 B            2⁴ --- speed lane
+
+  DEEP_BLOCK_SIZE          256 B           2⁸ --- geometry DNA lane
+
+  WARP_MAP_SIZE            72 B            ROI density navigator
+
+  PAYLOAD_SIZE             128 B           Geometry DNA data
+
+  PARITY_SIZE              32 B            SHA-256 parity guard
+
+  HYDRA_MAX_HEADS          16              Maximum concurrent heads
+
+  HYDRA_SPAWN_THRESHOLD    4 MB            Zone size triggers spawn
+
+  HYDRA_RETRACT_THRESH     512 KB          Zone size triggers retract
+
+  AUDIT_MAX_TILES          256             Max audit tiles
+
+  AUDIT_OVERLAP_RATIO      6.25%           Tile overlap constant
+
+  AUDIT_MAX_SIGNAL_QUEUE   64              Signal queue depth
+  ------------------------------------------------------------------------
+
+**3.2 WAL Constants**
+
+  ---------------------------------------------------------------------------------------
+  **Constant**             **Value**             **Meaning**
+  ------------------------ --------------------- ----------------------------------------
+  WAL_MAGIC                0x57414C50 (\"WALP\") Record corruption guard
+
+  WAL_RECORD_SIZE          32 B                  Fixed header
+                                                 (magic+type+pad+seq+offset+size+crc32)
+
+  WAL_MAX_PAYLOAD          4096 B                Max bytes per INTENT record
+
+  WAL_TYPE_INTENT          0x01                  Write intent with payload
+
+  WAL_TYPE_COMMIT          0x02                  Durability guarantee
+
+  WAL_TYPE_ABORT           0x03                  Discard intent
+  ---------------------------------------------------------------------------------------
+
+**3.3 Snapshot Constants**
+
+  ----------------------------------------------------------------------------------------------------
+  **Constant**           **Value**              **Meaning**
+  ---------------------- ---------------------- ------------------------------------------------------
+  SNAP_MAGIC             0x534E4150 (\"SNAP\")  File identity
+
+  SNAP_VERSION           0x01                   Current format version
+
+  SNAP_HEADER_SIZE       56 B                   magic+version+pad+last_seq+record_count+sha256\[32\]
+
+  SNAP_REC_HDR_SIZE      20 B                   Per-record: seq+data_offset+size
+
+  Hash algorithm         SHA-256 (FIPS 180-4)   Self-contained, no OpenSSL dep
+  ----------------------------------------------------------------------------------------------------
+
+**4. WAL Specification**
+
+**4.1 On-Disk Format**
+
+Each record in the WAL file:
+
+-   INTENT (32B header + N bytes payload): intent to write N bytes at
+    data_offset
+
+-   COMMIT (32B header only): makes the preceding INTENT durable
+
+-   ABORT (32B header only): discards the intent --- no replay
+
+**4.2 CRC32 Coverage**
+
+CRC32 (IEEE 802.3) covers: header bytes \[0..27\] (excluding crc32
+field) + payload. Computed with crc32 field set to 0, then stored.
+
+> crc = wal_crc32(0, &hdr, offsetof(WAL_RecordHeader, crc32));
+>
+> crc = wal_crc32(crc, payload, size);
+>
+> hdr.crc32 = crc;
+
+**4.3 Durability Guarantees**
+
+  ------------------------------------------------------------------------
+  **Operation**         **Sync**            **Guarantee**
+  --------------------- ------------------- ------------------------------
+  wal_write_intent()    fdatasync() after   INTENT survives power loss
+                        header+payload      before COMMIT
+
+  wal_write_commit()    fdatasync() after   COMMIT is the durability point
+                        header              
+
+  wal_write_abort()     None                ABORT need not be durable ---
+                                            no COMMIT = no replay
+
+  snap_finalize()       fsync() after       Snapshot is atomic after
+                        header write        finalize
+  ------------------------------------------------------------------------
+
+**4.4 Two-Pass Replay**
+
+Pass 1: Scan all records sequentially. Verify CRC32 of each. Stop at
+first mismatch (torn tail). Collect committed seqs into bitset.
+
+Pass 2: Re-scan. For each INTENT whose seq is in committed set, write
+payload to data_fd at data_offset.
+
+CRC mismatch policy: treat as torn WAL tail --- stop, do not error. This
+handles normal crash-mid-write scenarios.
+
+**4.5 wal_open() --- Reopen Safety**
+
+On reopen, scans WAL sequentially with CRC verification. Stops at first
+CRC mismatch (same boundary as replay). Sets next_seq =
+max_valid_seq + 1. This guarantees next_seq boundary = replay boundary
+always.
+
+**4.6 Crash Matrix**
+
+  -----------------------------------------------------------------------
+  **Crash Point**        **WAL State**       **Outcome**
+  ---------------------- ------------------- ----------------------------
+  Before INTENT          No INTENT on disk   No record --- clean
+  fdatasync                                  
+
+  After INTENT, before   INTENT only, no     Pass 1 skips --- not
+  COMMIT                 COMMIT              replayed
+
+  After COMMIT fdatasync INTENT + COMMIT on  Guaranteed replay ✓
+                         disk                
+
+  Mid-replay (data_fd    WAL intact          Re-replay on next boot
+  write)                                     (idempotent) ✓
+
+  Mid-INTENT write       Partial INTENT      CRC mismatch → stop at tail
+  (torn)                                     ✓
+  -----------------------------------------------------------------------
+
+**5. Snapshot Integrity Specification**
+
+**5.1 Purpose**
+
+Snapshot is the trust anchor for recovery. It freezes committed WAL
+state into a self-verifying file. Recovery: load snapshot (verify
+SHA-256) → replay WAL from last_seq+1 → live.
+
+**5.2 On-Disk Format**
+
+56-byte header followed by N records:
+
+  ---------------------------------------------------------------------------
+  **Field**        **Offset**   **Size**   **Content**
+  ---------------- ------------ ---------- ----------------------------------
+  magic            0            4B         0x534E4150 (\"SNAP\")
+
+  version          4            1B         0x01
+
+  \_pad            5            3B         zeros
+
+  last_seq         8            8B         Highest committed seq in this
+                                           snapshot
+
+  record_count     16           8B         Number of records in payload
+
+  payload_hash     24           32B        SHA-256 of all record bytes
+                                           (headers + data)
+
+  \[records\]      56           variable   N × (SNAP_RecHdr 20B + payload
+                                           bytes)
+  ---------------------------------------------------------------------------
+
+**5.3 Hash Coverage**
+
+SHA-256 covers every byte after the 56B header: for each record,
+hash(SNAP_RecHdr + payload bytes). Computed incrementally via
+sha256_update() on each snap_append() --- no second pass needed at
+finalize.
+
+**5.4 Fail-Fast Load**
+
+snap_load() always verifies hash before delivering any data to caller:
+
+1.  Read header, check magic/version
+
+2.  Verification pass: stream payload, recompute SHA-256
+
+3.  memcmp(computed, stored) --- if mismatch: return -3 immediately (NO
+    data delivery)
+
+4.  Deliver pass: stream payload, call callback for each record
+
+  -----------------------------------------------------------------------
+  **Return      **Meaning**
+  Code**        
+  ------------- ---------------------------------------------------------
+  0             OK --- hash verified, all records delivered
+
+  -1            I/O error
+
+  -2            Bad magic or version
+
+  -3            SHA-256 mismatch --- FAIL-FAST, do not use data
+  -----------------------------------------------------------------------
+
+**6. Fabric Layer**
+
+**6.1 BlockFabric (pogls_fabric.py)**
+
+Memory-mapped storage backend. BLOCK_SHIFT=8 (256B per block). Provides:
+
+-   fabric.slice(offset, length) → SliceView --- zero-copy window into
+    mmap
+
+-   fabric.snapshot() → snap_id --- O(1) root pointer swap
+
+-   fabric.restore(snap_id) --- revert to previous state
+
+-   Audit lane: read-only mmap view, separated from write path
+
+**6.2 STFabricConverter (st_to_fabric.py)**
+
+Converts .safetensors files to .pogls fabric for zero-copy tensor
+loading:
+
+-   Reads safetensors header JSON, maps each tensor to fabric blocks
+
+-   Index Block stored at block 0 (tensor name → offset mapping)
+
+-   FabricTensorLoader: load_tensor(name), load_layers(prefix) ---
+    zero-copy from mmap
+
+**6.3 WorkflowVersions (workflow_versions.py)**
+
+ComfyUI workflow version manager backed by BlockFabric:
+
+-   wv.save(name, workflow_dict) --- creates fabric snapshot, stores
+    diff
+
+-   wv.load(name) --- restores workflow from snapshot
+
+-   wv.diff(v1, v2) --- compare two versions
+
+-   wv.restore_previous() --- undo last save
+
+**7. Snapshot State Machine (POGLS Core)**
+
+These rules are invariants. Breaking any = undefined behavior.
+
+  ------------------------------------------------------------------------
+  **Rule**            **Invariant**
+  ------------------- ----------------------------------------------------
+  CERTIFY is one-shot PENDING→CONFIRMED_CERTIFIED ✓ \| CERTIFIED→void ✗
+                      (return -3) \| double certify ✗ (return -2)
+
+  AUTO→VOID is        CONFIRMED_AUTO→VOID ✓ \| VOID→invalidate again ✗
+  one-shot            (return -3)
+
+  Migration source    Must be CERTIFIED or PENDING --- never VOID
+
+  CERTIFIED is        is_checkpoint_immune() = true, cannot be GC\'d
+  checkpoint-immune   
+
+  Auto-promote        When audit_health == DEGRADED, auto-promote rejected
+  blocked             
+  ------------------------------------------------------------------------
+
+**8. VisualFeed Immutable Rules**
+
+These rules must not be broken by any future code:
+
+  -----------------------------------------------------------------------
+  **Rule**              **Detail**
+  --------------------- -------------------------------------------------
+  ✅ Read from Audit    VisualFeed uses read-only mmap for audit context
+  (PROT_READ mmap)      
+
+  ✅ Read from Hydra    Head status via const pointer --- no write access
+  (const ptr)           
+
+  ❌ NEVER read Core    GUI/ComfyUI must not access Core mmap
+  directly              
+
+  ❌ NEVER touch        Store frame in \_last_frame, apply in main thread
+  tkinter from bg       (\_poll_visual)
+  thread                
+
+  ❌ NEVER write via    Observer only --- all writes go through WAL+Hydra
+  VisualFeed            
+  -----------------------------------------------------------------------
+
+**9. Build & Test Commands**
+
+**9.1 Compile Core Tests**
+
+> gcc pogls_snapshot.c pogls_hydra.c pogls_audit.c pogls_visual.c
+> pogls_test.c -lm -o pogls_test
+>
+> gcc -Wall -Wextra -O2 pogls_wal.c pogls_wal_test.c -o pogls_wal_test
+>
+> gcc -Wall -Wextra -O2 pogls_snapshot_wal.c pogls_wal.c
+> pogls_snapshot_wal_test.c -o pogls_snapshot_test
+
+**9.2 Compile Kill-Test Binaries**
+
+> gcc -O2 pogls_wal.c pogls_wal_worker.c -o pogls_wal_worker
+>
+> gcc -O2 pogls_wal.c pogls_wal_verify.c -o pogls_wal_verify
+
+**9.3 Run Tests**
+
+> ./pogls_test \# expect: 80/80 PASS (T09=1 SKIP expected)
+>
+> ./pogls_wal_test \# expect: 24/24 PASS
+>
+> ./pogls_snapshot_test \# expect: 37/37 PASS
+
+**9.4 Kill Test**
+
+> python3 pogls_kill_test.py \--worker ./pogls_wal_worker \--verify
+> ./pogls_wal_verify \\
+>
+> \--cycles 10000 \--records 500
+
+Expected: 10000/10000 PASS, 0 corruption, exit code 0.
+
+**10. Tool Index**
+
+**10.1 Standalone Tools (not part of core engine)**
+
+  ------------------------------------------------------------------------------
+  **Tool**     **File**               **Purpose**              **Depends On**
+  ------------ ---------------------- ------------------------ -----------------
+  Fabric       pogls_fabric.py        mmap block storage,      Python stdlib
+  Backend                             zero-copy slicing, O(1)  
+                                      snapshot                 
+
+  ST Converter st_to_fabric.py        safetensors → pogls      pogls_fabric.py
+                                      fabric for zero-copy     
+                                      tensor load              
+
+  Workflow     workflow_versions.py   ComfyUI workflow version pogls_fabric.py
+  Versions                            history via fabric       
+
+  GUI          PUI.pyw                Tkinter visualizer:      Python tkinter
+                                      geometry map + integrity 
+                                      audit sim                
+
+  Kill Test    pogls_kill_test.py     Stress test: SIGKILL     worker+verify
+  Runner                              worker N times, verify   bins
+                                      each cycle               
+  ------------------------------------------------------------------------------
+
+**12. Tails --- Shadow Log & Emergency Key**
+
+Tails is a passive stalker component that runs anti-parallel to the main
+pointer. It has zero write access to the core system. Its sole purpose
+is to log abnormality events and hold a last-known-good state for
+emergency recovery.
+
+**12.1 Design**
+
+  -----------------------------------------------------------------------
+  **Property**                        **Value**
+  ----------------------------------- -----------------------------------
+  Direction                           Runs at opposite angle: address =
+                                      (MAX − pointer_address)
+
+  Storage                             Uses HoneycombSlot reserved space
+                                      (pogls_honeycomb_init --- currently
+                                      no-op in C core)
+
+  Access rights                       NONE --- read + log only. No write
+                                      path anywhere.
+
+  Activation                          Passive always. 1 exception:
+                                      pointer crash/corruption → provides
+                                      emergency key
+
+  Core file                           binary-index.js (Node.js,
+                                      standalone)
+
+  Tests                               test-binary-index.js --- 52/52 PASS
+  -----------------------------------------------------------------------
+
+**12.2 What Tails Stores**
+
+  -----------------------------------------------------------------------
+  **Data**                            **Purpose**
+  ----------------------------------- -----------------------------------
+  DNA hash per file version (MD5 or   Deduplication + identity
+  SHA-256)                            fingerprint
+
+  algoId per entry                    Safe MD5→SHA-256 migration without
+                                      false duplicates
+
+  Abnormality events                  Logged silently --- never forwarded
+                                      to core
+
+  Merkle root at immigration boundary Snapshot seal for integrity proof
+
+  Migration state                     Crash-safe hash upgrade, resumable
+  (IDLE/RUNNING/COMMITTED)            
+  -----------------------------------------------------------------------
+
+**12.3 Emergency Key --- 1 Active Case**
+
+If the main pointer crashes or its state is unrecoverable, Tails can
+provide:
+
+-   Last committed Merkle root before crash
+
+-   DNA hashes of all known-good versions
+
+-   Migration state snapshot (to resume or revert)
+
+This is a read-only handoff --- Tails never initiates recovery itself.
+It only provides the data; a human or orchestrator decides what to do
+with it.
+
+**12.4 Relationship to Core**
+
+  -----------------------------------------------------------------------
+                  **Tails**
+  --------------- -------------------------------------------------------
+  Reads WAL       ❌ No
+
+  Reads Snapshot  ❌ No
+
+  Reads           ❌ No
+  Hydra/Audit     
+
+  Writes anywhere ❌ Never
+
+  Uses            ✅ Reserved space only
+  HoneycombSlot   
+
+  Affects core    ❌ Zero impact
+  tests           
+
+  Language        Node.js (binary-index.js)
+  -----------------------------------------------------------------------
+
+**13. Checkpoint Changelog**
+
+  -----------------------------------------------------------------------
+  **Version**                         **Change**
+  ----------------------------------- -----------------------------------
+  V3.0                                Initial: Shadow/Deep blocks,
+                                      Angular addressing, Hydra, Audit,
+                                      VisualFeed
+
+  V3.1                                Added: Snapshot lifecycle state
+                                      machine, VisualFeed JSON pipe,
+                                      V31Adapter
+
+  V3.1 + WAL                          Added: pogls_wal --- CRC32 +
+                                      fdatasync + two-pass replay
+
+  V3.1 + WAL r2                       Fixed: wal_open CRC verify
+                                      (next_seq boundary = replay
+                                      boundary)
+
+  V3.1 + Snapshot WAL                 Added: pogls_snapshot_wal ---
+                                      SHA-256 (self-contained) + fsync +
+                                      monotonic seq
+
+  V3.1 + Snapshot WAL r2              Fixed: snap_append monotonic seq
+                                      enforce + MAX_REC = WAL_MAX_PAYLOAD
+
+  V3.1 CHECKPOINT                     Kill test: 200/200 PASS. All layers
+                                      locked.
+
+  V3.4 ← NOW                          Added: Tails (binary-index.js) ---
+                                      shadow log, Merkle seal, emergency
+                                      key. 52/52 PASS.
+  -----------------------------------------------------------------------
+
+**This document represents the frozen specification at checkpoint
+2026-03-03 --- POGLS V3.4.**
+
+Any modification to locked constants, WAL format, or Snapshot format
+requires a version bump and a new checkpoint document.
+
+**END OF SPECIFICATION**

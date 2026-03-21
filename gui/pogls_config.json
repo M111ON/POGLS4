@@ -1,0 +1,49 @@
+{
+  "_comment": "POGLS V3 Config — แก้ไขตรงนี้แล้ว restart app",
+  "window": {
+    "width": 1300,
+    "height": 780,
+    "min_width": 980,
+    "min_height": 620,
+    "sidebar_width": 200,
+    "dock_width": 290
+  },
+  "font": {
+    "family": "Helvatica",
+    "size_logo": 20,
+    "size_head": 15,
+    "size_ui": 14,
+    "size_sm": 12,
+    "size_xs": 10,
+    "size_tree": 11,
+    "tree_row_height": 30
+  },
+  "theme": {
+    "mode": "dark",
+    "bg": "#0b0d11",
+    "panel": "#0f1219",
+    "card": "#141820",
+    "border": "#1e2535",
+    "amber": "#f5a623",
+    "cyan": "#19d4d4",
+    "green": "#3de08a",
+    "red": "#e05555",
+    "blue": "#4fa8ff",
+    "text": "#d6dff0",
+    "muted": "#49597a",
+    "hover": "#18202e",
+    "sel": "#0d2245",
+    "selfg": "#4fa8ff"
+  },
+  "behavior": {
+    "confirm_delete": false,
+    "chunk_size_mb": 100,
+    "max_recent_snaps": 50,
+    "show_chunks_col": true,
+    "status_timeout_ms": 7000
+  },
+  "paths": {
+    "database_file": "pogls_db.json",
+    "dna_output_dir": ""
+  }
+}

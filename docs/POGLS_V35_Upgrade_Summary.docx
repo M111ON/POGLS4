@@ -1,0 +1,131 @@
++-----------------------------------------------------------------------+
+| **POGLS V3.4 → V3.5**                                                 |
+|                                                                       |
+| Upgrade Summary · WAL + Compute Stack                                 |
++-----------------------------------------------------------------------+
+
+**► Throughput Comparison**
+
+  ------------------------------ ------------- ---------------- ----------
+  **Metric**                     **V3.4        **V3.5 After**   **Gain**
+                                 Before**                       
+
+  fdatasync / write (1 op)       \~200 ops/s   **---**          **---**
+
+  Group commit batch 256         \~47k ops/s   **---**          **---**
+
+  Group commit batch 1024        ---           **\~460k ops/s** **10×**
+
+  mmap + MS_SYNC (1024)          ---           **\~370k ops/s** **8×**
+
+  mmap + MS_ASYNC (4 stripes)    ---           **\~13.6M        **65k×**
+                                               ops/s**          
+
+  Compute pipeline (memory)      \~400M ops/s  **\~490M ops/s** **1.2×**
+
+  L0Ring push/pop                ---           **\~140M ops/s** **new**
+
+  clut_pipeline (3 LUT ops)      \~3-5 ns      **\~2.2 ns**     **2×**
+  ------------------------------ ------------- ---------------- ----------
+
+**► Pipeline Architecture (V3.5)**
+
+  --------------------- ------------------------------------- ----------------
+  **Layer**             **Description**                       **Latency**
+
+  **Compute Engine**    Rubik · Morton · Bitboard · Frontier  \~2 ns
+
+  **ComputeLUT**        10KB L1-packed clut_pipeline()        \~2 ns
+
+  **L0Ring**            65536 × 32B = 2MB MPSC lock-free      \~7 ns
+
+  **CommitWorker**      background thread pop_batch(1024)     \~30 ns/batch
+
+  **WALStripeRouter**   lsn & 3 → 4 parallel WAL files        1 bit op
+
+  **WALMmap × 4**       mmap + MS_ASYNC zero-copy append      \~5 ns
+
+  **Flusher × 4**       background msync non-blocking         async
+
+  **NVMe**              kernel page flush parallel queues     \~0.3 ms
+  --------------------- ------------------------------------- ----------------
+
+**► Files Changed / Added (V3.4 core untouched)**
+
+  ------------------------------ --------------------------------------------
+  **File**                       **What changed / added**
+
+  pogls_wal_stripe.h **\[MOD\]** WSRecord 28B → 32B + \_Static_assert guards
+
+  pogls_exec_window.h            EWRecord 32B, EW_MAX_OPS 256→1024,
+  **\[MOD\]**                    WAL_BATCH_BYTES alias
+
+  pogls_wal_mmap.h/.c            mmap WAL: fallocate 8GB, MS_SYNC/ASYNC,
+  **\[NEW\]**                    wal_alloc_record()
+
+  pogls_compute_lut.h/.c         ComputeLUT 10KB L1-packed:
+  **\[NEW\]**                    Rubik+Morton+NodeLUT
+
+  pogls_wal_l0_ring.h            L0Ring 65536 slots, SPSC+MPSC, pop_batch
+  **\[NEW\]**                    1024
+
+  pogls_exec_window_lf.h         ExecWindowLF: CAS ring, ewlf_push/pop_batch
+  **\[NEW\]**                    
+
+  pogls_wal_stripe_router.h/.c   WALStripeRouter: 4 stripes, lsn&3 routing,
+  **\[NEW\]**                    parallel NVMe
+
+  pogls_wal_commit_worker.h/.c   CommitWorker thread: L0→EW→Router loop
+  **\[NEW\]**                    
+
+  pogls_frontier.h **\[NEW\]**   pogls_frontier_diffuse() + global
+                                 node_adj_map\[\]
+
+  pogls_bitboard.h **\[MOD\]**   bitboard_set(), bitboard_next_active()
+                                 team-B compat
+
+  pogls_rubik.h **\[MOD\]**      pogls_rubik_move/inverse/parity() aliases,
+                                 dedup
+
+  pogls_morton.h **\[MOD\]**     pogls_morton_encode(), \_pogls_expand_bits()
+                                 aliases
+
+  pogls_compute_stack.c          node_adj_map\[\], frontier_build_adj_map(),
+  **\[MOD\]**                    cross-assert
+
+  pogls_bench_colab.c            Standalone single-file benchmark (this
+  **\[NEW\]**                    session)
+  ------------------------------ --------------------------------------------
+
+**► Frozen Constants (V3.4 --- do not change)**
+
+  ----------------------- ----------------------- -----------------------
+  **Constant**            **Value**               **Rule**
+
+  MODE_WARP               **3**                   frozen
+
+  WARP_MAP_SIZE           **72**                  frozen
+
+  HYDRA_MAX_HEADS         **16**                  frozen
+
+  NODE_MAX                **162**                 frozen
+
+  RUBIK_COMPACT_STATES    **256**                 frozen
+
+  WAL CRC                 **CRC32C**              frozen
+  ----------------------- ----------------------- -----------------------
+
+**► Colab Quick Start**
+
+> \# Google Colab --- run in code cell:
+>
+> !wget -q URL/pogls_bench_colab.c
+>
+> !gcc -O2 -std=c11 -D_GNU_SOURCE pogls_bench_colab.c -o bench -lpthread
+>
+> !./bench
+>
+> Single-file, zero dependencies. Copy pogls_bench_colab.c → Colab →
+> compile → run.
+
+*POGLS V3.5 · session 2026-03-07*
