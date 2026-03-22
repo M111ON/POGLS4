@@ -11,8 +11,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@latest
-
+        uses: actions/checkout@v4
       - name: Install unzip
         run: sudo apt-get install unzip
 
