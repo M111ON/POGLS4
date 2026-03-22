@@ -56,6 +56,10 @@
 
 #include "storage/pogls_delta.h"
 
+/* forward declare — full type in pogls_mesh.h (included after) */
+struct Mesh_s;
+typedef void (*MeshIngestFn)(struct Mesh_s*, const void*, uint32_t);
+
 /* ── constants (FROZEN) ──────────────────────────────────────────── */
 #define DETACH_RING_SIZE      4096u
 #define DETACH_RING_MASK      (DETACH_RING_SIZE - 1u)
@@ -146,6 +150,12 @@ typedef struct {
     pthread_t          flush_thread;
 
     uint32_t           magic;
+
+    /* Tail summon: called from drain thread with each batch
+     * Set via detach_lane_set_mesh() after mesh_init().
+     * NULL = drain to delta only (no Tail update).            */
+    MeshIngestFn       mesh_cb;   /* mesh_ingest_batch fn ptr  */
+    struct Mesh_s     *mesh_ctx;  /* Mesh instance             */
 } DetachLane;
 
 /* ── timestamp helper ────────────────────────────────────────────── */
@@ -232,18 +242,20 @@ static inline uint32_t detach_flush_pass(DetachLane *dl)
     if (avail == 0) return 0;
     if (avail > DETACH_FLUSH_BATCH) avail = DETACH_FLUSH_BATCH;
 
-    /* build DiamondBlock batch (1 entry per block) */
+    /* build DiamondBlock batch (for delta lane) + entry batch (for Mesh) */
     DiamondBlock blk[DETACH_FLUSH_BATCH];
+    DetachEntry  entry_batch[DETACH_FLUSH_BATCH];
     for (uint32_t i = 0; i < avail; i++) {
         DetachEntry *e = &dl->ring[(t + i) & DETACH_RING_MASK];
+        entry_batch[i] = *e;   /* copy for Mesh callback              */
         memset(&blk[i], 0, sizeof(blk[i]));
         blk[i].data[0] = e->value;
         blk[i].data[1] = e->angular_addr;
         blk[i].data[2] = e->timestamp_ns;
         blk[i].data[3] = ((uint64_t)e->reason)
                        | ((uint64_t)e->route_was << 8)
-                       | ((uint64_t)e->shell_n   << 16)   /* shell at capture */
-                       | ((uint64_t)e->phase18   << 24);  /* gate phase */
+                       | ((uint64_t)e->shell_n   << 16)
+                       | ((uint64_t)e->phase18   << 24);
         blk[i].data[4] = ((uint64_t)e->phase18)
                        | ((uint64_t)e->phase288 << 8)
                        | ((uint64_t)e->phase306 << 24)
@@ -259,6 +271,10 @@ static inline uint32_t detach_flush_pass(DetachLane *dl)
         delta_append(dl->delta, DETACH_DELTA_LANE, blk, avail);
         dl->stats.flushed += avail;
     }
+
+    /* Tail summon: forward batch to Mesh (Voronoi+Delaunay+Tail update) */
+    if (dl->mesh_cb && dl->mesh_ctx)
+        dl->mesh_cb(dl->mesh_ctx, entry_batch, avail);
 
     return avail;
 }
@@ -302,6 +318,18 @@ static inline int detach_lane_start(DetachLane *dl)
                             _detach_flush_thread, dl);
     if (rc == 0) dl->thread_started = 1;
     return rc;
+}
+
+/* detach_lane_set_mesh — wire Mesh as Tail summon target
+ * Call AFTER both detach_lane_init() and mesh_init().
+ * fn = (MeshIngestFn)mesh_ingest_batch  */
+static inline void detach_lane_set_mesh(DetachLane  *dl,
+                                         MeshIngestFn fn,
+                                         struct Mesh_s *mesh)
+{
+    if (!dl) return;
+    dl->mesh_cb  = fn;
+    dl->mesh_ctx = mesh;
 }
 
 static inline int detach_lane_stop(DetachLane *dl)

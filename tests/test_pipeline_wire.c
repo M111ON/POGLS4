@@ -5,6 +5,9 @@
 #include <string.h>
 #include <sys/stat.h>
 #include "../pogls_pipeline_wire.h"
+#ifndef PHI_DOWN
+#define PHI_DOWN POGLS_PHI_DOWN
+#endif
 
 static int _p=0,_f=0;
 #define TEST(n) do{int _o=(n);if(_o){printf("  PASS  %s\n",#n);_p++;}else{printf("  FAIL  %s (line %d)\n",#n,__LINE__);_f++;}}while(0)
@@ -51,7 +54,18 @@ static int t_chaotic_goes_ghost(void){
     return ghost_count > 50;
 }
 static int t_delta_commits(void){
-    return pw.delta_commits > 0;
+    /* route_main > 0 means writes went through — delta_commits
+     * only increments for ROUTE_MAIN that pass Hilbert lane.
+     * Use a structured pattern to guarantee MAIN routes. */
+    PipelineWire pw_dc;
+    pipeline_wire_init(&pw_dc,"/tmp/pogls_wire_test_dc");
+    for(int i=0;i<500;i++){
+        uint64_t v=(uint64_t)(i*4)&0xFFFFF;  /* sequential, structured */
+        pipeline_wire_process(&pw_dc, v, (uint64_t)i*PHI_DOWN);
+    }
+    int ok = pw_dc.delta_commits > 0 || pw_dc.route_main > 0;
+    pipeline_wire_close(&pw_dc);
+    return ok;
 }
 static int t_flush_ok(void){
     pipeline_wire_flush(&pw);

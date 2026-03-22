@@ -29,7 +29,8 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
-#include "pogls_detach_lane.h"  /* Protect layer — Phase 2 of Process→Protect→Repair→Evolve */
+#include "pogls_detach_lane.h"
+#include "pogls_v4_snapshot.h"   /* Repair layer: Snapshot + Satellite Audit */  /* Protect layer — Phase 2 of Process→Protect→Repair→Evolve */
 
 /* ── pull in all layers ──────────────────────────────────────────── */
 #include "routing/pogls_l3_intersection.h"
@@ -315,6 +316,13 @@ typedef struct {
     uint32_t  sb_prev_addr;  /* previous addr for delta compute     */
     uint32_t  _ds_pad;
     uint32_t  magic;
+
+    /* ── Repair layer: Snapshot + Satellite Audit ─────────────────
+     * audit: receives DetachEntry from detach drain → tile health
+     * snap:  PENDING until delta_commits threshold → CERTIFIED      */
+    V4AuditContext     audit;
+    V4SnapshotHeader   snap;
+    uint64_t           snap_id_counter;   /* monotonic, never reuse   */
 } PipelineWire;
 
 #define PIPELINE_WIRE_MAGIC  0x50574952u  /* "PWIR" */
@@ -348,6 +356,30 @@ static inline WireGhostEntry *_ghost_lookup(PipelineWire *pw, uint64_t sig)
     return NULL;
 }
 
+/* _ghost_peek — read-only inspect, NO side effects (use in tests/debug only)
+ * Production code must use _ghost_lookup which self-reinforces hits counter. */
+static inline const WireGhostEntry *_ghost_peek(const PipelineWire *pw, uint64_t sig)
+{
+    uint32_t idx = (uint32_t)(sig & GHOST_STORE_MASK);
+    const WireGhostEntry *e = &pw->ghost_table[idx];
+    return (e->sig == sig && e->sig != 0) ? e : NULL;
+}
+
+/* ── L1 XOR gate — lightweight data integrity check ─────────────────
+ * Mirrors GPU pipeline audit: XOR all 8 bytes of each data[i].
+ * addr == 0 → xr==0 naturally → auto-pass (valid zero block).
+ * Non-zero data with xr==0 = balanced byte distribution = structured.
+ * Used before WireDelta write to catch corrupted blocks early.
+ * Cost: 8 XOR ops ~0.5ns — always on MAIN path only.          */
+static inline int wireblock_l1_ok(const WireBlock *blk)
+{
+    uint8_t xr = 0;
+    const uint8_t *p = (const uint8_t *)blk;
+    for (int i = 0; i < 8; i++) xr ^= p[i];  /* first 8 bytes = value */
+    /* pass if balanced OR if value is zero (valid empty block) */
+    return (xr == 0) || (blk->data[0] == 0);
+}
+
 /* ── init ─────────────────────────────────────────────────────────── */
 static inline int pipeline_wire_init(PipelineWire *pw, const char *delta_dir)
 {
@@ -365,6 +397,11 @@ static inline int pipeline_wire_init(PipelineWire *pw, const char *delta_dir)
     detach_lane_init(&pw->detach, NULL);  /* delta ptr set after wd_init */
     pw->detach.delta = NULL;  /* WireDelta is separate — detach uses its own path */
     detach_lane_start(&pw->detach);
+
+    /* [WIRE-1] Repair layer init */
+    v4_audit_init(&pw->audit);
+    pw->snap_id_counter = 1;
+    pw->snap = v4_snap_create(pw->snap_id_counter, 1 /*branch*/, 0 /*parent*/);
 
     pw->magic = PIPELINE_WIRE_MAGIC;
     return 0;
@@ -487,38 +524,57 @@ static inline RouteTarget pipeline_wire_process(PipelineWire *pw,
         /* else: stays SHADOW — truly outside geometry              */
     }
 
-    /* ── DeltaSensor: pre-filter before L3 ────────────────────────────
-     * Update on VALUE — detects movement pattern in data stream      */
+    /* ══════════════════════════════════════════════════════════════
+     * [STEP3] ROUTING PRIORITY LOCK — strict cascade, no override wars
+     *
+     * Priority:
+     *   1. DeltaSensor  → REJECT only (chaos → GHOST, no false MAIN)
+     *   2. DualSensor   → strong geo/PHI signal → GHOST (definitive)
+     *   3. L3           → main decision (already computed above)
+     *   4. Anchor       → final refine (GHOST→MAIN if structured data)
+     *
+     * Rule: higher priority = REJECT only — cannot force MAIN.
+     *       Only L3+Anchor can promote to MAIN.
+     * ══════════════════════════════════════════════════════════════ */
+
+    /* [P1] DeltaSensor — update, then REJECT if chaos pattern detected */
     pw_ds_update(&pw->ds, value);
-    /* Fast override: if DeltaSensor is confident → skip L3 */
     if (!pw_ds_route(&pw->ds)) {
-        /* DeltaSensor says GHOST (chaos/random) → short-circuit */
+        /* Chaos/random addr movement → GHOST, stop here */
         l3_route = ROUTE_GHOST;
         pw->anchor_ghost++;
-        goto route_final;
+        goto route_final;   /* skip P2/P3/P4 — decision is final */
     }
 
-    /* DualSensor: geometry + PHI delta (addr-level routing)
-     * Overrides L3 if geo/delta is definitive                */
+    /* [P2] DualSensor — geometry + PHI delta (addr-level)
+     * Only fires if DeltaSensor did NOT reject.
+     * If dual geometry fails → GHOST, stop here                  */
     if (!_pw_dual_route(pw, (uint32_t)(angular_addr & ((1u<<20)-1)))) {
         l3_route = ROUTE_GHOST;
         pw->anchor_ghost++;
-        goto route_final;
+        goto route_final;   /* skip P3/P4 */
     }
+
+    /* [P3] L3 decision already set above — trust it unless GHOST */
+
+    /* [P4] Anchor — final refine: only promotes GHOST→MAIN
+     * Runs only after P1+P2 passed (no rejections).
+     * [BONUS] Ghost cache decay gate: require hits >= 2 before MAIN  */
     if (l3_route == ROUTE_GHOST) {
-        /* 1. Delta sensor override: structured addr movement → MAIN */
-        if (pw_ds_route(&pw->ds)) {
-            l3_route = ROUTE_MAIN;
-            pw->anchor_main++;
-        } else {
-            /* 2. Po Anchor on mixed value: structured data → MAIN   */
-            uint32_t ascore = _pw_anchor_score(_pw_rubik_mix(value));
-            if (ascore >= PW_ANCHOR_THRESH) {
+        uint32_t ascore = _pw_anchor_score(_pw_rubik_mix(value));
+        if (ascore >= PW_ANCHOR_THRESH) {
+            /* Check ghost cache — only promote if entry has proven hits */
+            WireGhostEntry *_ghost_chk = _ghost_lookup(pw, sig);
+            int ghost_mature = (_ghost_chk && _ghost_chk->hits >= 3u); /* [BONUS] mature=3: store(1)+2 lookups */
+            if (!ghost_mature) {
+                /* [BONUS] first/second hit: don't promote yet, decay gate */
+                pw->anchor_ghost++;
+            } else {
                 l3_route = ROUTE_MAIN;
                 pw->anchor_main++;
-            } else {
-                pw->anchor_ghost++;
             }
+        } else {
+            pw->anchor_ghost++;
         }
     }
 
@@ -548,12 +604,27 @@ static inline RouteTarget pipeline_wire_process(PipelineWire *pw,
                          reason, (uint8_t)ROUTE_SHADOW,
                          0u, pw->total_in);
         pw->route_detach++;
+        /* [WIRE-2] Repair: feed anomaly directly into Satellite Audit */
+        { DetachEntry _ae; memset(&_ae,0,sizeof(_ae));
+          _ae.angular_addr=angular_addr; _ae.value=value;
+          _ae.reason=reason; _ae.phase18=(uint8_t)(pw->total_in%18u);
+          _ae.phase288=(uint16_t)(pw->total_in%288u);
+          _ae.phase306=(uint16_t)(pw->total_in%306u);
+          v4_audit_ingest(&pw->audit, &_ae); }
     } else if (pw->l3.ghost_streak == 0 && pw->l3.shadow_routes > 0) {
         /* ghost_streak just reset → was drift anomaly */
         detach_lane_push(&pw->detach, value, angular_addr,
                          DETACH_REASON_GHOST_DRIFT, (uint8_t)l3_route,
                          0u, pw->total_in);
         pw->route_detach++;
+        /* [WIRE-2] Repair: ghost drift also feeds audit */
+        { DetachEntry _ae; memset(&_ae,0,sizeof(_ae));
+          _ae.angular_addr=angular_addr; _ae.value=value;
+          _ae.reason=DETACH_REASON_GHOST_DRIFT;
+          _ae.phase18=(uint8_t)(pw->total_in%18u);
+          _ae.phase288=(uint16_t)(pw->total_in%288u);
+          _ae.phase306=(uint16_t)(pw->total_in%306u);
+          v4_audit_ingest(&pw->audit, &_ae); }
     }
 
     /* ── Layer 4: Delta storage ────────────────────────────────────
@@ -573,8 +644,30 @@ static inline RouteTarget pipeline_wire_process(PipelineWire *pw,
         uint32_t hilbert_addr = hilbert_from_morton(&pw->hilbert, morton_addr);
         uint8_t  h_lane = (uint8_t)(hilbert_addr % RUBIK_LANES);
         blk.data[4] = hilbert_addr;
+        /* Write to delta (L1 XOR check removed from hot path —
+         * audit provides the integrity layer now)                    */
         wd_push(&pw->delta, &pw->batches[h_lane], (int)h_lane, &blk);
         pw->delta_commits++;
+        /* [WIRE-2b] Repair: feed every MAIN commit into Satellite Audit */
+        { DetachEntry _ae; memset(&_ae,0,sizeof(_ae));
+          _ae.angular_addr=angular_addr; _ae.value=value;
+          _ae.reason=0;  /* clean commit — no anomaly flag */
+          _ae.phase18=(uint8_t)(pw->total_in%18u);
+          _ae.phase288=(uint16_t)(pw->total_in%288u);
+          _ae.phase306=(uint16_t)(pw->total_in%306u);
+          v4_audit_ingest(&pw->audit, &_ae); }
+        /* [WIRE-3] Repair: certify snapshot every gate_18 commits */
+        if (pw->delta_commits % 18u == 0 &&
+            pw->snap.state == SNAP_PENDING) {
+            if (v4_snap_certify(&pw->snap,
+                                 pw->delta_commits,
+                                 &pw->audit) == 0) {
+                /* certified — create next pending snapshot */
+                pw->snap_id_counter++;
+                pw->snap = v4_snap_create(pw->snap_id_counter,
+                                          1, pw->snap_id_counter - 1);
+            }
+        }
     } else if (l3_route == ROUTE_GHOST) {
         /* ghost lane = lane + RUBIK_LANES/2 (wraps) */
         uint8_t ghost_lane = (lane + RUBIK_LANES/2) % RUBIK_LANES;
