@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<title>POGLS QRPN — Status Map</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0a0a0f; color: #e0e0e0; font-family: 'Courier New', monospace; padding: 24px; }
+  h1 { color: #00ff88; font-size: 1.3rem; letter-spacing: 3px; margin-bottom: 4px; }
+  .subtitle { color: #666; font-size: 0.75rem; margin-bottom: 24px; }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+  .full { grid-column: 1/-1; }
+
+  .card {
+    background: #111118;
+    border: 1px solid #222;
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .card-title {
+    font-size: 0.65rem;
+    letter-spacing: 2px;
+    color: #888;
+    margin-bottom: 12px;
+    text-transform: uppercase;
+  }
+
+  /* STATUS BADGES */
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 0.7rem;
+    font-weight: bold;
+    letter-spacing: 1px;
+  }
+  .ok    { background: #003322; color: #00ff88; border: 1px solid #00ff88; }
+  .warn  { background: #332200; color: #ffaa00; border: 1px solid #ffaa00; }
+  .todo  { background: #220022; color: #cc88ff; border: 1px solid #cc88ff; }
+  .frozen{ background: #001133; color: #4488ff; border: 1px solid #4488ff; }
+
+  /* PIPELINE FLOW */
+  .pipeline {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .pipe-row {
+    display: flex;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .pipe-label {
+    font-size: 0.65rem;
+    color: #555;
+    width: 60px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+  }
+  .pipe-box {
+    flex: 1;
+    padding: 8px 12px;
+    border-radius: 4px;
+    font-size: 0.72rem;
+    line-height: 1.5;
+    border-left: 3px solid;
+  }
+  .pipe-arrow {
+    text-align: center;
+    color: #333;
+    font-size: 0.8rem;
+    padding-left: 68px;
+  }
+
+  /* QRPN CORE — the main visual */
+  .qrpn-diagram {
+    position: relative;
+    height: 280px;
+  }
+  svg.main-svg { width: 100%; height: 100%; }
+
+  /* 3-WORLD TABLE */
+  table { width: 100%; border-collapse: collapse; font-size: 0.72rem; }
+  th { color: #555; font-weight: normal; text-align: left; padding: 4px 8px; border-bottom: 1px solid #222; font-size: 0.65rem; letter-spacing: 1px; }
+  td { padding: 5px 8px; border-bottom: 1px solid #1a1a1a; }
+  tr:last-child td { border: none; }
+
+  .world-a { color: #4af; }
+  .world-b { color: #fa4; }
+  .world-c { color: #a4f; }
+
+  /* PHASE ROADMAP */
+  .phases { display: flex; gap: 8px; }
+  .phase {
+    flex: 1;
+    padding: 10px 8px;
+    border-radius: 6px;
+    border: 1px solid #222;
+    text-align: center;
+    font-size: 0.65rem;
+    line-height: 1.8;
+  }
+  .phase-name { font-size: 0.78rem; font-weight: bold; margin-bottom: 4px; }
+  .phase-active { border-color: #00ff88; background: #001a0d; }
+  .phase-done   { border-color: #333; background: #0d0d0d; color: #555; }
+  .phase-next   { border-color: #cc88ff44; background: #110022; }
+
+  /* MATH BLOCK */
+  .math {
+    background: #0d0d15;
+    border: 1px solid #1a1a2e;
+    border-radius: 6px;
+    padding: 12px 16px;
+    font-size: 0.72rem;
+    line-height: 2;
+  }
+  .math .eq { color: #ffcc44; }
+  .math .comment { color: #446; margin-left: 8px; }
+
+  /* TEST RESULTS */
+  .test-row { display: flex; justify-content: space-between; align-items: center; padding: 5px 0; border-bottom: 1px solid #151515; font-size: 0.72rem; }
+  .test-row:last-child { border: none; }
+  .test-name { color: #aaa; }
+
+  /* ISSUE LIST */
+  .issue { padding: 8px 0; border-bottom: 1px solid #151515; font-size: 0.72rem; display: flex; gap: 10px; }
+  .issue:last-child { border: none; }
+  .issue-icon { color: #ffaa00; flex-shrink: 0; }
+  .issue-text { color: #bbb; line-height: 1.5; }
+  .issue-text code { color: #44aaff; background: #0a0a1a; padding: 1px 4px; border-radius: 2px; font-size: 0.68rem; }
+</style>
+</head>
+<body>
+
+<h1>POGLS V4.12 — QRPN VERIFICATION LAYER</h1>
+<div class="subtitle">Quad-Radial Pythagorean Net · Shadow Mode Active · World 3 (A+B+C overlap)</div>
+
+<div class="grid">
+
+  <!-- LEFT: QRPN CORE MATH VISUAL -->
+  <div class="card">
+    <div class="card-title">⬡ QRPN Core — What It Actually Does</div>
+    <div class="math">
+      <div><span class="eq">A</span> = radial(value, N, seedA)  <span class="comment">← World A projection</span></div>
+      <div><span class="eq">B</span> = radial(value, N, seedB)  <span class="comment">← World B projection</span></div>
+      <div style="color:#333; margin: 4px 0">────────────────────────────────</div>
+      <div><span class="eq">c²</span> = A² + B²               <span class="comment">← Pythagorean generator</span></div>
+      <div><span class="eq">a²+b²</span> = (A²-B²)² + (2AB)²  <span class="comment">← self-check (always = c²)</span></div>
+      <div style="color:#333; margin: 4px 0">────────────────────────────────</div>
+      <div><span class="eq">Cq</span> = mix32(c)               <span class="comment">← CPU signature</span></div>
+      <div><span class="eq">Cg</span> = phi_scatter_hex(value)  <span class="comment">← GPU witness (hex fold)</span></div>
+      <div style="color:#333; margin: 4px 0">────────────────────────────────</div>
+      <div style="color:#00ff88; font-size:0.8rem">PASS if:  (A+B == Cg)  OR  (Cq == Cg)</div>
+      <div style="color:#ff4444; font-size: 0.7rem; margin-top: 4px">FAIL if:  BOTH mismatch → shadow_fail++</div>
+    </div>
+
+    <div style="margin-top: 14px;">
+      <div class="card-title">3 LAYERS OF DEFENSE</div>
+      <div class="pipeline">
+        <div class="pipe-row">
+          <div class="pipe-label">L1</div>
+          <div class="pipe-box" style="border-color:#4af; background:#001122">
+            <strong style="color:#4af">XOR Audit</strong> — DiamondBlock XOR verify (V4 existing)
+          </div>
+        </div>
+        <div class="pipe-arrow">↓</div>
+        <div class="pipe-row">
+          <div class="pipe-label">L2+L3</div>
+          <div class="pipe-box" style="border-color:#00ff88; background:#001a0d">
+            <strong style="color:#00ff88">QRPN NEW</strong> — Pythagorean a²+b²=c²  +  Linear A+B=Cg witness
+          </div>
+        </div>
+        <div class="pipe-arrow">↓</div>
+        <div class="pipe-row">
+          <div class="pipe-label">L4</div>
+          <div class="pipe-box" style="border-color:#a4f; background:#110022">
+            <strong style="color:#a4f">Merkle SHA256</strong> — Delta commit snapshot (V4 existing)
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT: 3-WORLD SYSTEM -->
+  <div class="card">
+    <div class="card-title">🌐 3-World Overlap System</div>
+
+    <div style="position:relative; height: 160px; margin-bottom: 16px;">
+      <svg viewBox="0 0 300 160" width="100%" height="100%">
+        <!-- World A circle -->
+        <circle cx="110" cy="90" r="60" fill="none" stroke="#4af" stroke-width="1.5" stroke-dasharray="4,3" opacity="0.7"/>
+        <text x="76" y="68" fill="#4af" font-size="10" font-family="Courier New">World A</text>
+        <text x="72" y="80" fill="#4af88" font-size="9" font-family="Courier New">CPU binary 2ⁿ</text>
+        <text x="70" y="92" fill="#4af88" font-size="9" font-family="Courier New">lanes 0-3</text>
+
+        <!-- World B circle -->
+        <circle cx="190" cy="90" r="60" fill="none" stroke="#fa4" stroke-width="1.5" stroke-dasharray="4,3" opacity="0.7"/>
+        <text x="200" y="68" fill="#fa4" font-size="10" font-family="Courier New">World B</text>
+        <text x="196" y="80" fill="#fa488" font-size="9" font-family="Courier New">CPU ternary 3ⁿ</text>
+        <text x="196" y="92" fill="#fa488" font-size="9" font-family="Courier New">lanes 4-7</text>
+
+        <!-- World C ring (GPU witness) — new in QRPN -->
+        <circle cx="150" cy="70" r="50" fill="none" stroke="#a4f" stroke-width="1.5" stroke-dasharray="2,4" opacity="0.6"/>
+        <text x="138" y="28" fill="#a4f" font-size="10" font-family="Courier New">World C</text>
+        <text x="130" y="40" fill="#a4f88" font-size="9" font-family="Courier New">GPU witness (hex)</text>
+
+        <!-- Overlap center = 54 nexus -->
+        <circle cx="150" cy="92" r="14" fill="#0d1a0d" stroke="#00ff88" stroke-width="1.5"/>
+        <text x="140" y="89" fill="#00ff88" font-size="9" font-family="Courier New" font-weight="bold">54</text>
+        <text x="136" y="100" fill="#00ff8888" font-size="8" font-family="Courier New">nexus</text>
+
+        <!-- Labels -->
+        <text x="60" y="150" fill="#333" font-size="8" font-family="Courier New">V3.8 (engine_bridge)</text>
+        <text x="185" y="150" fill="#333" font-size="8" font-family="Courier New">V4 (pipeline_wire)</text>
+        <text x="118" y="150" fill="#00ff8866" font-size="8" font-family="Courier New">QRPN</text>
+      </svg>
+    </div>
+
+    <table>
+      <tr>
+        <th>World</th><th>Path</th><th>Role in QRPN</th><th>Status</th>
+      </tr>
+      <tr>
+        <td class="world-a">A</td>
+        <td>CPU radial seedA</td>
+        <td>radial(value, N, seedA) → A</td>
+        <td><span class="badge ok">LIVE</span></td>
+      </tr>
+      <tr>
+        <td class="world-b">B</td>
+        <td>CPU radial seedB</td>
+        <td>radial(value, N, seedB) → B</td>
+        <td><span class="badge ok">LIVE</span></td>
+      </tr>
+      <tr>
+        <td class="world-c">C</td>
+        <td>GPU hex witness</td>
+        <td>phi_scatter_hex(value) → Cg</td>
+        <td><span class="badge warn">CPU STUB</span></td>
+      </tr>
+    </table>
+
+    <div style="margin-top:12px; font-size:0.68rem; color:#556; line-height:1.7">
+      <span style="color:#ffaa00">⚠</span>  World C ตอนนี้ใช้ <code style="color:#44aaff">qrpn_gpu_witness_cpu_fallback()</code><br>
+      → Cg = Cq เสมอ ∴ shadow_fail = 0 guaranteed<br>
+      → Phase E: แทนด้วย GPU kernel จริง (phi_scatter_hex)
+    </div>
+  </div>
+
+  <!-- BOTTOM LEFT: TEST STATUS -->
+  <div class="card">
+    <div class="card-title">✓ TEST FILES — ต้องรัน</div>
+    <div class="test-row">
+      <div class="test-name">test_qrpn_hex.c — T1 Determinism</div>
+      <span class="badge ok">DESIGNED ✓</span>
+    </div>
+    <div class="test-row">
+      <div class="test-name">test_qrpn_hex.c — T2 Entropy separation</div>
+      <span class="badge ok">DESIGNED ✓</span>
+    </div>
+    <div class="test-row">
+      <div class="test-name">test_qrpn_hex.c — T3 Distribution 32-bit</div>
+      <span class="badge ok">DESIGNED ✓</span>
+    </div>
+    <div class="test-row">
+      <div class="test-name">test_qrpn_hex.c — T4 hex ≠ phi_scatter</div>
+      <span class="badge ok">DESIGNED ✓</span>
+    </div>
+    <div class="test-row">
+      <div class="test-name">test_qrpn_shadow.c — 1M ops shadow_fail=0</div>
+      <span class="badge warn">PENDING RUN</span>
+    </div>
+    <div style="margin-top: 12px; font-size: 0.68rem; color: #446;">
+      Pass condition: shadow_fail == 0 with CPU fallback<br>
+      (เป็น baseline ก่อน Phase E wiring GPU จริง)
+    </div>
+  </div>
+
+  <!-- BOTTOM RIGHT: KNOWN ISSUES -->
+  <div class="card">
+    <div class="card-title">⚡ ประเด็นที่ต้องดู</div>
+
+    <div class="issue">
+      <div class="issue-icon">⚠</div>
+      <div class="issue-text">
+        <strong style="color:#ffaa00">CPU Fallback mirror path</strong><br>
+        <code>qrpn_gpu_witness_cpu_fallback()</code> คำนวณ Cg = Cq (path เดียวกัน)<br>
+        → shadow_fail จะ = 0 เสมอ <em>แต่ไม่ได้ test World C จริง</em><br>
+        ต้องแก้เป็น <code>qrpn_phi_scatter_hex()</code> ใน fallback
+      </div>
+    </div>
+
+    <div class="issue">
+      <div class="issue-icon">⚠</div>
+      <div class="issue-text">
+        <strong style="color:#ffaa00">QRPN ยัง degenerate guard อ่อน</strong><br>
+        return -10 เมื่อ <code>(A|B)==0</code> แต่ไม่มี logging<br>
+        → ควรนับใน stats แยก (<code>degenerate_count</code>)
+      </div>
+    </div>
+
+    <div class="issue">
+      <div class="issue-icon">✦</div>
+      <div class="issue-text">
+        <strong style="color:#a4f">Phase E wiring (next step)</strong><br>
+        GPU kernel ต้อง implement <code>qrpn_phi_scatter_hex()</code><br>
+        ให้ Cg มา independent path → witness มีความหมายจริง
+      </div>
+    </div>
+  </div>
+
+  <!-- PHASE ROADMAP FULL -->
+  <div class="card full">
+    <div class="card-title">🗺 QRPN DEPLOYMENT PHASES</div>
+    <div class="phases">
+      <div class="phase phase-done">
+        <div class="phase-name" style="color:#555">Phase A</div>
+        <div style="color:#444">Design QRPN spec</div>
+        <div style="color:#444">3-world invariant</div>
+        <div style="color:#444">pogls_qrpn.h</div>
+        <div style="margin-top:6px"><span class="badge frozen">DONE</span></div>
+      </div>
+      <div class="phase phase-done">
+        <div class="phase-name" style="color:#555">Phase B</div>
+        <div style="color:#444">Wire into</div>
+        <div style="color:#444">pipeline_wire.h</div>
+        <div style="color:#444">shadow mode init</div>
+        <div style="margin-top:6px"><span class="badge frozen">DONE</span></div>
+      </div>
+      <div class="phase phase-done">
+        <div class="phase-name" style="color:#555">Phase C</div>
+        <div style="color:#444">phi_scatter_hex</div>
+        <div style="color:#444">hex 6-rotation fold</div>
+        <div style="color:#444">entropy separation</div>
+        <div style="margin-top:6px"><span class="badge frozen">DONE</span></div>
+      </div>
+      <div class="phase phase-active">
+        <div class="phase-name" style="color:#00ff88">Phase D ← NOW</div>
+        <div>Run test_qrpn_hex</div>
+        <div>Run test_qrpn_shadow</div>
+        <div>Confirm shadow_fail=0</div>
+        <div style="margin-top:6px"><span class="badge ok">ACTIVE</span></div>
+      </div>
+      <div class="phase phase-next">
+        <div class="phase-name" style="color:#cc88ff">Phase E</div>
+        <div style="color:#887799">GPU kernel</div>
+        <div style="color:#887799">phi_scatter_hex</div>
+        <div style="color:#887799">real witness path</div>
+        <div style="margin-top:6px"><span class="badge todo">NEXT</span></div>
+      </div>
+      <div class="phase phase-next">
+        <div class="phase-name" style="color:#cc88ff">Phase F</div>
+        <div style="color:#887799">SOFT mode</div>
+        <div style="color:#887799">rewind_head() hook</div>
+        <div style="color:#887799">production deploy</div>
+        <div style="margin-top:6px"><span class="badge todo">FUTURE</span></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<div style="font-size:0.65rem; color:#333; text-align:center; margin-top: 8px">
+  V4.12 · pogls_qrpn.h + pogls_pipeline_wire.h (wired) · test_qrpn_hex.c + test_qrpn_shadow.c (pending run)
+</div>
+
+</body>
+</html>
