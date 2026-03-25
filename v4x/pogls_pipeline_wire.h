@@ -32,6 +32,7 @@
 #include "pogls_detach_lane.h"
 #include "pogls_v4_snapshot.h"   /* Repair layer: Snapshot + Satellite Audit */  /* Protect layer — Phase 2 of Process→Protect→Repair→Evolve */
 #include "pogls_qrpn.h"          /* QRPN verification layer (shadow mode)     */
+#include "pogls_v4x_wire.h"      /* Phase F: V4x canonical+temporal (SOFT)    */
 
 /* ── pull in all layers ──────────────────────────────────────────── */
 #include "routing/pogls_l3_intersection.h"
@@ -330,6 +331,17 @@ typedef struct {
      * shadow mode = log only, never blocks pipeline.
      * N borrowed from ShellN anchor (8).                            */
     qrpn_ctx_t         qrpn;
+
+    /* ── Phase F: V4x canonical + temporal core (SOFT mode) ───────
+     * Runs IN PARALLEL on MAIN path — shadow only, never blocks.
+     * Provides: canonical snap, 720-step temporal scheduling,
+     *           multi-anchor selection, commit ring.
+     * Deploy phases:
+     *   SOFT  = run + log, output ignored (current)
+     *   HARD  = v_snapped replaces value in delta write (future)    */
+    V4xWire            v4x;
+    uint64_t           v4x_ops;             /* MAIN ops through V4x  */
+    uint64_t           v4x_ring_overflows;  /* ring overflow count    */
 } PipelineWire;
 
 #define PIPELINE_WIRE_MAGIC  0x50574952u  /* "PWIR" */
@@ -413,6 +425,9 @@ static inline int pipeline_wire_init(PipelineWire *pw, const char *delta_dir)
     /* [QRPN] init verification layer — shadow mode, N=8 (ShellN anchor) */
     qrpn_ctx_init(&pw->qrpn, 8u);
     pw->qrpn.mode = QRPN_SHADOW;
+
+    /* [V4x] Phase F init — SOFT mode, 4 virtual cores */
+    v4x_wire_init(&pw->v4x, 4u);
 
     pw->magic = PIPELINE_WIRE_MAGIC;
     return 0;
@@ -661,6 +676,18 @@ static inline RouteTarget pipeline_wire_process(PipelineWire *pw,
             uint32_t Cg = qrpn_gpu_witness_cpu_fallback(value);
             qrpn_check(value, angular_addr, Cg, &pw->qrpn, NULL);
         }
+
+        /* [V4x Phase F — SOFT] canonical + temporal + multi-anchor
+         * Runs in parallel: output v_snapped logged but NOT used yet.
+         * Transition to HARD: replace value with v_snapped in blk.data[0].
+         * value truncated to uint32 — upper bits are addr context.      */
+        {
+            uint32_t v_snapped = v4x_step(&pw->v4x, (uint32_t)(value & 0xFFFFFFFFu));
+            (void)v_snapped;   /* SOFT: ignore output, shadow only       */
+            pw->v4x_ops++;
+            /* track ring health */
+            pw->v4x_ring_overflows = pw->v4x.ring.total_overflows;
+        }
         /* Write to delta (L1 XOR check removed from hot path —
          * audit provides the integrity layer now)                    */
         wd_push(&pw->delta, &pw->batches[h_lane], (int)h_lane, &blk);
@@ -746,6 +773,13 @@ static inline void pipeline_wire_stats(const PipelineWire *pw)
     printf("╚══════════════════════════════════════════════════╝\n\n");
     detach_lane_stats(&pw->detach);
     qrpn_stats_print(&pw->qrpn);
+
+    /* Phase F V4x stats */
+    printf("[V4x SOFT] ops=%-10llu ring_overflows=%-6llu anchor_enforces=%-6llu cycle_ends=%llu\n",
+           (unsigned long long)pw->v4x_ops,
+           (unsigned long long)pw->v4x_ring_overflows,
+           (unsigned long long)pw->v4x.anchor_enforces,
+           (unsigned long long)pw->v4x.cycle_ends);
 }
 
 #endif /* POGLS_PIPELINE_WIRE_H */

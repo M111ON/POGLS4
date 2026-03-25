@@ -140,3 +140,5 @@ vite.config.ts.timestamp-*
 
 #folder
 zip
+Temporial Storage.docx
+*.ipynb

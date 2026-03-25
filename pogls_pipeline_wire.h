@@ -31,6 +31,7 @@
 #include <stdio.h>
 #include "pogls_detach_lane.h"
 #include "pogls_v4_snapshot.h"   /* Repair layer: Snapshot + Satellite Audit */  /* Protect layer — Phase 2 of Process→Protect→Repair→Evolve */
+#include "pogls_qrpn.h"          /* QRPN verification layer (shadow mode)     */
 
 /* ── pull in all layers ──────────────────────────────────────────── */
 #include "routing/pogls_l3_intersection.h"
@@ -323,6 +324,12 @@ typedef struct {
     V4AuditContext     audit;
     V4SnapshotHeader   snap;
     uint64_t           snap_id_counter;   /* monotonic, never reuse   */
+
+    /* ── QRPN verification layer (shadow mode) ────────────────────
+     * Runs BEFORE delta write on MAIN path only.
+     * shadow mode = log only, never blocks pipeline.
+     * N borrowed from ShellN anchor (8).                            */
+    qrpn_ctx_t         qrpn;
 } PipelineWire;
 
 #define PIPELINE_WIRE_MAGIC  0x50574952u  /* "PWIR" */
@@ -402,6 +409,10 @@ static inline int pipeline_wire_init(PipelineWire *pw, const char *delta_dir)
     v4_audit_init(&pw->audit);
     pw->snap_id_counter = 1;
     pw->snap = v4_snap_create(pw->snap_id_counter, 1 /*branch*/, 0 /*parent*/);
+
+    /* [QRPN] init verification layer — shadow mode, N=8 (ShellN anchor) */
+    qrpn_ctx_init(&pw->qrpn, 8u);
+    pw->qrpn.mode = QRPN_SHADOW;
 
     pw->magic = PIPELINE_WIRE_MAGIC;
     return 0;
@@ -644,6 +655,12 @@ static inline RouteTarget pipeline_wire_process(PipelineWire *pw,
         uint32_t hilbert_addr = hilbert_from_morton(&pw->hilbert, morton_addr);
         uint8_t  h_lane = (uint8_t)(hilbert_addr % RUBIK_LANES);
         blk.data[4] = hilbert_addr;
+
+        /* [QRPN] verify before write — shadow mode: log only, never blocks */
+        {
+            uint32_t Cg = qrpn_gpu_witness_cpu_fallback(value);
+            qrpn_check(value, angular_addr, Cg, &pw->qrpn, NULL);
+        }
         /* Write to delta (L1 XOR check removed from hot path —
          * audit provides the integrity layer now)                    */
         wd_push(&pw->delta, &pw->batches[h_lane], (int)h_lane, &blk);
@@ -728,6 +745,7 @@ static inline void pipeline_wire_stats(const PipelineWire *pw)
            (unsigned long long)(pw->route_detach*100/t));
     printf("╚══════════════════════════════════════════════════╝\n\n");
     detach_lane_stats(&pw->detach);
+    qrpn_stats_print(&pw->qrpn);
 }
 
 #endif /* POGLS_PIPELINE_WIRE_H */
